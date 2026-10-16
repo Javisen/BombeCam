@@ -86,7 +86,6 @@ type nativeSink struct {
 	aStepCand     uint32
 	aStepVotes    int
 	aClock        uint32 // audio RTP clock rate (0 = the AAC sample rate)
-	loggedNoAudio bool
 	droppedAudio  int64
 	g711Next      int64
 
@@ -622,11 +621,12 @@ func (s *nativeSink) onAudio(payload []byte, rtpTS uint32, haveRTP bool) {
 		s.droppedAudio++
 		return
 	}
-	if s.pub == nil || !s.pub.hasAudio {
-		if s.pub != nil && !s.loggedNoAudio {
-			s.loggedNoAudio = true
-			fmt.Printf("[%s] [publish] audio started after the stream was announced; audio will join on the next reconnect\n", s.label)
-		}
+	if s.pub == nil {
+		return
+	}
+	if !s.pub.hasAudio {
+		fmt.Printf("[%s] [publish] audio started after the stream was announced; re-announcing the stream with audio\n", s.label)
+		s.setPubLocked(nil)
 		return
 	}
 	rate := int64(s.audioCfg.SampleRate)

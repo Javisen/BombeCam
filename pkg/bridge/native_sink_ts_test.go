@@ -3,6 +3,7 @@ package bridge
 import (
 	"encoding/hex"
 	"math/rand"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -270,6 +271,71 @@ var testADTS = func() []byte {
 	f[6] = 0xFC
 	return f
 }()
+
+func TestLateAAC_ReplacesVideoOnlyPublication(t *testing.T) {
+	s, clk := newTestSink(t, true)
+	firstClient, firstServer := net.Pipe()
+	defer firstServer.Close()
+	first := &rtspPublisher{conn: firstClient, done: make(chan struct{})}
+	s.pub = first
+	s.lastDial = clk.now()
+
+	s.OnAudioRTP(testADTS, 5000)
+
+	if s.audioCfg == nil {
+		t.Fatal("AAC configuration was not learned")
+	}
+	if s.pub != nil {
+		t.Fatal("video-only publication was not removed")
+	}
+	if !s.lastDial.Equal(clk.now()) {
+		t.Fatal("late-audio transition bypassed the existing reconnect backoff")
+	}
+	select {
+	case <-first.Done():
+	default:
+		t.Fatal("first video-only publication was not closed")
+	}
+
+	// A later video-only publication in the same sink must be recoverable too;
+	// logging state must never suppress the functional transition.
+	secondClient, secondServer := net.Pipe()
+	defer secondServer.Close()
+	second := &rtspPublisher{conn: secondClient, done: make(chan struct{})}
+	s.pub = second
+	s.OnAudioRTP(testADTS, 5960)
+	if s.pub != nil {
+		t.Fatal("second video-only publication was not removed")
+	}
+	select {
+	case <-second.Done():
+	default:
+		t.Fatal("second video-only publication was not closed")
+	}
+}
+
+func TestLateAAC_InvalidADTSKeepsVideoOnlyPublication(t *testing.T) {
+	s, _ := newTestSink(t, true)
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	old := &rtspPublisher{conn: client, done: make(chan struct{})}
+	s.pub = old
+
+	s.OnAudioRTP([]byte{0x01, 0x02, 0x03}, 5000)
+
+	if s.audioCfg != nil {
+		t.Fatal("invalid ADTS produced an AAC configuration")
+	}
+	if s.pub != old {
+		t.Fatal("invalid ADTS replaced the video-only publication")
+	}
+	select {
+	case <-old.Done():
+		t.Fatal("invalid ADTS closed the video-only publication")
+	default:
+	}
+}
 
 func (r *audioRun) packet(rtpStep uint32, wallStep time.Duration) {
 	r.rtp += rtpStep
